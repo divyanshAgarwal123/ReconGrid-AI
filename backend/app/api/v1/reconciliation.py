@@ -9,11 +9,12 @@ from datetime import date
 from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
-from sqlalchemy import text
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
 from app.core.database import get_db
+from app.core.locks import lock_batch
 from app.models.reconciliation_log import ReconciliationLog
 from app.repositories.reconciliation_repo import ReconciliationRepository, StaleDecisionError
 from app.repositories.settlement_repo import SettlementRepository
@@ -218,20 +219,19 @@ async def get_reconciliation_records(
     )
 
 
-async def _human_mutation_db(db: AsyncSession = Depends(get_db)) -> AsyncSession:
-    if db.get_bind().dialect.name == "sqlite":
-        await db.execute(text("BEGIN IMMEDIATE"))
-    return db
-
-
 async def _active_decision(repo: ReconciliationRepository, record_id: str) -> ReconciliationLog:
-    log = await repo.get_by_id(record_id)
-    if log is None:
+    batch_id = await repo.session.scalar(select(ReconciliationLog.batch_id).where(ReconciliationLog.id == record_id))
+    if batch_id is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Record not found")
-    await repo.lock_human_decisions(log.batch_id)
+    # Match the ingestion and webhook lock order before loading the active row.
+    await lock_batch(repo.session, batch_id)
+    await repo.lock_human_decisions(batch_id)
     latest = await repo.get_by_id(record_id)
     if latest is None or latest.superseded:
-        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Record changed. Refresh the ledger.")
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="This record was replaced by a newer reconciliation run or decision. Refresh the ledger and retry.",
+        )
     return latest
 
 
@@ -255,7 +255,7 @@ async def _append_decision(
 async def approve_suggested_match(
     record_id: str,
     action_req: ActionRequest = ActionRequest(),
-    db: AsyncSession = Depends(_human_mutation_db),
+    db: AsyncSession = Depends(get_db),
 ):
     """Single-click human approval for a SUGGESTED match."""
     repo = ReconciliationRepository(db)
@@ -274,9 +274,10 @@ async def approve_suggested_match(
 async def batch_approve_suggested_matches(
     batch_id: str,
     request: BatchApproveRequest,
-    db: AsyncSession = Depends(_human_mutation_db),
+    db: AsyncSession = Depends(get_db),
 ):
     """Append approvals for high-confidence suggestions without competing settlement claims."""
+    await lock_batch(db, batch_id)
     repo = ReconciliationRepository(db)
     try:
         count = await repo.batch_approve_suggestions(batch_id, request.min_confidence)
@@ -289,7 +290,7 @@ async def batch_approve_suggested_matches(
 async def deny_suggested_match(
     record_id: str,
     action_req: ActionRequest = ActionRequest(),
-    db: AsyncSession = Depends(_human_mutation_db),
+    db: AsyncSession = Depends(get_db),
 ):
     """Single-click human dismissal of a SUGGESTED match -> moves to EXCEPTION."""
     repo = ReconciliationRepository(db)
@@ -306,7 +307,7 @@ async def deny_suggested_match(
 async def revert_human_action(
     record_id: str,
     action_req: ActionRequest = ActionRequest(),
-    db: AsyncSession = Depends(_human_mutation_db),
+    db: AsyncSession = Depends(get_db),
 ):
     """Reverts a human APPROVED or DENIED action back to SUGGESTED."""
     repo = ReconciliationRepository(db)
@@ -337,7 +338,7 @@ async def revert_human_action(
 async def resolve_conflict(
     record_id: str,
     resolve_req: ConflictResolveRequest,
-    db: AsyncSession = Depends(_human_mutation_db),
+    db: AsyncSession = Depends(get_db),
 ):
     """Resolves a CONFLICT by binding to the chosen settlement ID or dismissing the match."""
     repo = ReconciliationRepository(db)
