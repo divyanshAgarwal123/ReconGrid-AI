@@ -9,9 +9,11 @@ Validates:
 - Full regression safety across HDFC, ICICI, SBI, and Generic dialects
 """
 
+import csv
 import io
 from decimal import Decimal
 from pathlib import Path
+from unittest.mock import MagicMock
 
 import pytest
 from fastapi import UploadFile
@@ -24,6 +26,7 @@ from app.utils.csv_parser import (
     is_zero_or_placeholder_amount,
     parse_flexible_date,
 )
+from app.utils.pdf_parser import BankPdfParser
 
 FIXTURES_DIR = Path(__file__).resolve().parent.parent / "fixtures"
 
@@ -301,3 +304,44 @@ async def test_ingestion_service_axis_and_kotak(db_session: AsyncSession):
     assert kotak_resp.total_rows_parsed == 6
     assert kotak_resp.inserted_count == 6
     assert kotak_resp.duplicate_count == 0
+
+
+@pytest.mark.parametrize(
+    ("fixture", "reference"),
+    [
+        ("pnb_sample.csv", "PNBTEST"),
+        ("bob_sample.csv", "BOBTEST"),
+        ("federal_sample.csv", "FEDERALTEST"),
+        ("canara_sample.csv", "CANARATEST"),
+    ],
+)
+def test_additional_bank_dialects_share_csv_and_pdf_table_mapping(fixture, reference):
+    lines = (FIXTURES_DIR / fixture).read_text(encoding="utf-8").splitlines()
+    csv_rows = list(BankCsvParser.parse_csv_stream(iter(lines)))
+    header_index = next(i for i, line in enumerate(lines) if "," in line)
+    cells = list(csv.reader(lines[header_index:]))
+    cells[0] = [header.replace(" ", "\n", 1) for header in cells[0]]
+    pdf_page = MagicMock()
+    pdf_page.extract_tables.return_value = [cells]
+    pdf_rows = BankPdfParser._extract_tables_from_page(pdf_page, 1)
+
+    for rows in (csv_rows, pdf_rows):
+        assert [
+            (row["date"].strftime("%Y-%m-%d"), row["amount"], row["direction"], row["utr"]) for row in rows
+        ] == [
+            ("2026-08-24", Decimal("650.75"), "CREDIT", reference + "0001"),
+            ("2026-08-25", Decimal("49.50"), "DEBIT", reference + "0002"),
+        ]
+    assert [row["row_hash"] for row in csv_rows] == [row["row_hash"] for row in pdf_rows]
+
+
+def test_pdf_explicit_direction_and_placeholder_instrument():
+    pdf_page = MagicMock()
+    pdf_page.extract_tables.return_value = [[
+        ["Date", "Remarks", "Instrument ID", "Amount (INR)", "Debit/Credit", "Balance Amount"],
+        ["24-Aug-2026", "Transfer BOBTEST1111", "000000", "42.75", "Debit", "57.25"],
+    ]]
+
+    row, = BankPdfParser._extract_tables_from_page(pdf_page, 1)
+
+    assert (row["amount"], row["direction"], row["utr"]) == (Decimal("42.75"), "DEBIT", "BOBTEST1111")

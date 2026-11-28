@@ -1,0 +1,5 @@
+PNB synthetic test statement
+No customer data
+Txn Date,Particulars,Cheque Number,Debit Amt.,Credit Amt.,Balance
+24/08/2026,Transfer in,PNBTEST0001,0,650.75,3650.75
+25/08/2026,Transfer out,PNBTEST0002,49.50,0,3601.25

@@ -11,9 +11,11 @@ from pathlib import Path
 
 import pytest
 from httpx import ASGITransport, AsyncClient
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.main import app
+from app.models.bank_transaction import BankTransaction
 from app.models.razorpay_settlement import RazorpaySettlement
 from app.utils.money import to_decimal
 
@@ -178,3 +180,21 @@ async def test_corrupted_file_all_invalid_rows_returns_actionable_400(db_session
         assert data["success"] is False
         assert data["error"]["code"] == "STATEMENT_VALIDATION_ERROR"
         assert len(data["error"]["details"]) >= 2
+
+
+@pytest.mark.parametrize("dialect", ["pnb", "bob", "federal", "canara"])
+async def test_upload_additional_bank_dialects_without_column_overrides(db_session: AsyncSession, dialect: str):
+    fixture = Path(__file__).parent.parent / "fixtures" / f"{dialect}_sample.csv"
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        result = await client.post(
+            "/api/v1/bank/upload",
+            data={"batch_id": dialect},
+            files={"file": (fixture.name, fixture.read_bytes(), "text/csv")},
+        )
+
+    assert result.status_code == 200
+    assert result.json()["data"]["inserted_count"] == 2
+    rows = (await db_session.scalars(
+        select(BankTransaction).where(BankTransaction.batch_id == dialect).order_by(BankTransaction.date)
+    )).all()
+    assert [(row.direction, str(row.amount)) for row in rows] == [("CREDIT", "650.75"), ("DEBIT", "49.50")]

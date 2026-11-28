@@ -12,7 +12,13 @@ import pypdf
 
 from app.core.config import settings
 from app.core.logging import logger
-from app.utils.csv_parser import compute_row_hash, extract_utr_from_text, parse_flexible_date
+from app.utils.csv_parser import (
+    BankCsvParser,
+    compute_row_hash,
+    extract_utr_from_text,
+    is_placeholder_ref,
+    parse_flexible_date,
+)
 from app.utils.money import parse_amount_and_direction, to_decimal
 
 # Known Indian Bank Password Formats / Patterns Guide
@@ -216,7 +222,7 @@ class BankPdfParser:
 
                 date_idx = header_map.get("date")
                 raw_date = clean_cells[date_idx] if (date_idx is not None and date_idx < len(clean_cells)) else ""
-                if not raw_date or not cls.DATE_LINE_REGEX.match(raw_date):
+                if not raw_date:
                     continue
 
                 try:
@@ -229,11 +235,12 @@ class BankPdfParser:
 
                 ref_idx = header_map.get("ref")
                 raw_ref = clean_cells[ref_idx] if (ref_idx is not None and ref_idx < len(clean_cells)) else ""
-                utr = raw_ref or extract_utr_from_text(description)
+                utr = extract_utr_from_text(description) if is_placeholder_ref(raw_ref) else raw_ref
 
                 wdr_idx = header_map.get("withdrawal")
                 dep_idx = header_map.get("deposit")
                 amt_idx = header_map.get("amount")
+                dir_idx = header_map.get("direction")
 
                 amount = Decimal("0.00")
                 direction = "CREDIT"
@@ -241,6 +248,7 @@ class BankPdfParser:
                 raw_dep = clean_cells[dep_idx] if (dep_idx is not None and dep_idx < len(clean_cells)) else ""
                 raw_wdr = clean_cells[wdr_idx] if (wdr_idx is not None and wdr_idx < len(clean_cells)) else ""
                 raw_amt = clean_cells[amt_idx] if (amt_idx is not None and amt_idx < len(clean_cells)) else ""
+                raw_dir = clean_cells[dir_idx] if (dir_idx is not None and dir_idx < len(clean_cells)) else ""
 
                 if raw_dep and to_decimal(raw_dep) > Decimal("0.00"):
                     amount = to_decimal(raw_dep)
@@ -251,7 +259,9 @@ class BankPdfParser:
                 elif raw_amt:
                     amount_text = re.sub(r"(DR|CR)\.$", r"\1", raw_amt, flags=re.IGNORECASE)
                     amount, direction = parse_amount_and_direction(amount_text)
-                else:
+                    if raw_dir.upper().startswith(("D", "C")):
+                        direction = "DEBIT" if raw_dir.upper().startswith("D") else "CREDIT"
+                if amount == Decimal("0.00"):
                     continue
 
                 row_hash = compute_row_hash(parsed_date, amount, direction, utr, description)
@@ -278,10 +288,11 @@ class BankPdfParser:
 
     @classmethod
     def _map_table_headers(cls, headers: list[str]) -> dict[str, int]:
-        """Maps column indices to canonical fields based on regex matching."""
-        mapping: dict[str, int] = {}
-        for idx, text in enumerate(headers):
-            if not text:
+        """Reuse CSV dialects and retain PDF fallback for unmatched column headers."""
+        normalized = [" ".join(header.split()) for header in headers]
+        mapping = {field: normalized.index(header) for field, header in BankCsvParser.detect_headers(normalized).items()}
+        for idx, text in enumerate(normalized):
+            if not text or idx in mapping.values() or cls.BALANCE_HEADER.search(text):
                 continue
             if cls.DATE_HEADER.search(text) and "date" not in mapping:
                 mapping["date"] = idx

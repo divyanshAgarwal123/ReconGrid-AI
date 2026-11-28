@@ -1,0 +1,4 @@
+Federal Bank synthetic test statement
+Txn Date,Narrative,Doc Number,Paid In,Paid Out,Running Balance
+24-Aug-2026,Transfer in,FEDERALTEST0001,650.75,0,3650.75
+25-Aug-2026,Transfer out,FEDERALTEST0002,0,49.50,3601.25

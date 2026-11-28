@@ -1,0 +1,4 @@
+Bank of Baroda synthetic test statement
+Date,Remarks,Instrument ID,Amount (INR),Balance (INR)
+24/08/2026,Transfer in,BOBTEST0001,650.75,3650.75
+25/08/2026,Transfer out,BOBTEST0002,-49.50,3601.25
